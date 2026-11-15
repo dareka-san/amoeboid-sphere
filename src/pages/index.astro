@@ -1,0 +1,49 @@
+---
+import ProjectLayout from '../layouts/ProjectLayout.astro';
+
+const title = 'Amoeboid Sphere';
+const tags = ['WebGL 2', 'GLSL', 'JavaScript'];
+const drawingDescription = '灰色の空間を漂う大小の黒い球体と、マウスや指についてくる球体。近づくと表面が溶け合い、そのまますれ違います。';
+---
+
+<ProjectLayout title={title} tags={tags}>
+  <div class="drawing-viewport">
+    <canvas id="drawing" role="img" aria-label={drawingDescription}>
+      {drawingDescription}
+    </canvas>
+  </div>
+  <p id="status" class="status" role="status" aria-atomic="true"></p>
+  <noscript><p class="status">表示するにはJavaScriptを有効にしてください。</p></noscript>
+  <script src="../scripts/engine.js"></script>
+</ProjectLayout>
+
+<style>
+  :global(body) {
+    margin: 0;
+    background: #d1d1d1;
+  }
+
+  .drawing-viewport {
+    --sphere-blur: 6px;
+    --blur-padding: calc(4 * var(--sphere-blur));
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  #drawing {
+    position: absolute;
+    inset: calc(-1 * var(--blur-padding));
+    display: block;
+    width: calc(100% + 2 * var(--blur-padding));
+    height: calc(100% + 2 * var(--blur-padding));
+    filter: blur(var(--sphere-blur));
+    pointer-events: auto;
+    touch-action: pinch-zoom;
+  }
+
+  #drawing[data-static] {
+    pointer-events: none;
+  }
+</style>

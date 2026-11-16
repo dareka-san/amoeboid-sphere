@@ -6,7 +6,7 @@ void main() {
 }
 `;
 
-const fragmentSource = `#version 300 es
+const sceneFragmentSource = `#version 300 es
 precision highp float;
 
 uniform vec2 uResolution;
@@ -20,12 +20,6 @@ const vec3 background = vec3(209. / 255.);
 const vec3 charcoal = vec3(31. / 255.);
 const vec3 keyLight = normalize(vec3(-0.61, 0.69, 0.39));
 const float blendWidth = 0.37;
-
-float grain(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.yzx + 33.33);
-  return fract((p.x + p.y) * p.z) - 0.5;
-}
 
 float followerHeight(vec2 offset, float radius, out vec2 normalXY) {
   float stretch = uFollowerState.z;
@@ -79,7 +73,7 @@ void main() {
   float softness = clamp(7. + 22. * gradient, 9., 24.) * uPixelRatio;
   float coverage = smoothstep(-softness, 0.65 * softness, edgeDistance);
   if (coverage <= 0.) {
-    outColor = vec4(background, 1.);
+    outColor = vec4(background, 0.);
     return;
   }
 
@@ -93,10 +87,41 @@ void main() {
   float rim = pow(1. - normal.z, 4.) * (0.22 + 0.78 * diffuse);
   vec3 surface = charcoal * (0.49 + 2.0 * diffuse) + 0.23 * highlight + 0.105 * rim;
   surface = mix(vec3(0.12), surface, 1.5);
-  vec3 exposure = mix(background, surface, coverage);
-  float filmGrain = grain(vec3(floor(gl_FragCoord.xy), 3.));
-  float texture = filmGrain * 0.225 * sqrt(exposure.r * coverage);
-  outColor = vec4(exposure + texture, 1.);
+  // Store the silhouette in alpha so the finishing grain stays on the spheres.
+  outColor = vec4(mix(background, surface, coverage), coverage);
+}
+`;
+
+const frostFragmentSource = `#version 300 es
+precision highp float;
+
+uniform sampler2D uScene;
+uniform vec2 uResolution;
+uniform float uScatterRadius;
+out vec4 outColor;
+
+float grain(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z) - 0.5;
+}
+
+void main() {
+  vec2 pixel = floor(gl_FragCoord.xy);
+  vec2 uv = gl_FragCoord.xy / uResolution;
+  vec2 spread = uScatterRadius / uResolution;
+  vec2 scatter = 2. * vec2(grain(vec3(pixel, 11.)), grain(vec3(pixel, 27.)));
+  vec2 offset = scatter * spread;
+  vec2 crossOffset = vec2(-scatter.y, scatter.x) * spread;
+
+  // Nearby, jittered samples diffuse the highlights and break up the contour.
+  vec4 exposure = 0.24 * texture(uScene, uv)
+                + 0.29 * texture(uScene, uv + offset)
+                + 0.21 * texture(uScene, uv - offset)
+                + 0.14 * texture(uScene, uv + crossOffset)
+                + 0.12 * texture(uScene, uv - crossOffset);
+  float film = grain(vec3(pixel, 3.)) * 0.13 * sqrt(exposure.r * exposure.a);
+  outColor = vec4(exposure.rgb + film, 1.);
 }
 `;
 
@@ -173,23 +198,36 @@ function mount(canvas, status) {
       bounds.y = nextY;
     }
 
-    // Extend the projection into the blur padding without scaling the scene.
+    // Extend the projection into the frost padding without scaling the scene.
     const x = drawWidth / shortest;
     const y = drawHeight / shortest;
     devicePixelRatio = window.devicePixelRatio || 1;
     const pixelRatio = Math.min(devicePixelRatio, 1.5, Math.sqrt(1_650_000 / (drawWidth * drawHeight)));
     const width = Math.max(1, Math.round(drawWidth * pixelRatio));
     const height = Math.max(1, Math.round(drawHeight * pixelRatio));
+    // The CSS viewport reserves four scatter radii on each side.
+    const scatterRadius = Math.max(0, (drawWidth - viewWidth) / 8) * pixelRatio;
     if (projection?.width === width && projection.height === height &&
-        projection.x === x && projection.y === y && projection.pixelRatio === pixelRatio) return;
+        projection.x === x && projection.y === y && projection.pixelRatio === pixelRatio &&
+        projection.scatterRadius === scatterRadius) return;
 
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.uniform2f(renderer.resolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    const bufferWidth = gl.drawingBufferWidth;
+    const bufferHeight = gl.drawingBufferHeight;
+    if (projection?.bufferWidth !== bufferWidth || projection.bufferHeight !== bufferHeight) {
+      gl.bindTexture(gl.TEXTURE_2D, renderer.sceneTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, bufferWidth, bufferHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    gl.viewport(0, 0, bufferWidth, bufferHeight);
+    gl.useProgram(renderer.sceneProgram);
+    gl.uniform2f(renderer.resolution, bufferWidth, bufferHeight);
     gl.uniform2f(renderer.bounds, x, y);
     gl.uniform1f(renderer.pixelRatio, pixelRatio);
-    projection = { width, height, x, y, pixelRatio };
+    gl.useProgram(renderer.frostProgram);
+    gl.uniform2f(renderer.frostResolution, bufferWidth, bufferHeight);
+    gl.uniform1f(renderer.scatterRadius, scatterRadius);
+    projection = { width, height, x, y, pixelRatio, scatterRadius, bufferWidth, bufferHeight };
 
     positionDriftingSpheres(large, small, bounds, elapsed);
     render();
@@ -206,8 +244,14 @@ function mount(canvas, status) {
 
     const stretch = Math.hypot(follower.stretchX, follower.stretchY);
     const inverseStretch = stretch >= 0.0001 ? 1 / stretch : 0;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, renderer.sceneFramebuffer);
+    gl.useProgram(renderer.sceneProgram);
     gl.uniform3f(renderer.followerState, follower.stretchX * inverseStretch, follower.stretchY * inverseStretch, stretch);
     gl.uniform3fv(renderer.spheres, sphereUniforms);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(renderer.frostProgram);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -316,7 +360,7 @@ function mount(canvas, status) {
   initialize();
 }
 
-function createRenderer(gl) {
+function createProgram(gl, fragmentSource) {
   const program = gl.createProgram();
   if (!program) throw new Error('Could not create a WebGL program.');
   const shaders = [];
@@ -338,10 +382,7 @@ function createRenderer(gl) {
     }
     for (const shader of shaders) gl.detachShader(program, shader);
 
-    // The fullscreen triangle uses gl_VertexID and needs no vertex buffers.
-    const vao = gl.createVertexArray();
-    if (!vao) throw new Error('Could not create a WebGL vertex array.');
-    gl.bindVertexArray(vao);
+    return program;
   } catch (error) {
     gl.deleteProgram(program);
     throw error;
@@ -349,13 +390,51 @@ function createRenderer(gl) {
     for (const shader of shaders) gl.deleteShader(shader);
   }
 
-  gl.useProgram(program);
+}
+
+function createRenderer(gl) {
+  const sceneProgram = createProgram(gl, sceneFragmentSource);
+  let frostProgram, vao, sceneTexture, sceneFramebuffer;
+  try {
+    frostProgram = createProgram(gl, frostFragmentSource);
+    vao = gl.createVertexArray();
+    sceneTexture = gl.createTexture();
+    sceneFramebuffer = gl.createFramebuffer();
+    if (!vao || !sceneTexture || !sceneFramebuffer) throw new Error('Could not create WebGL render targets.');
+
+    gl.bindVertexArray(vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFramebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTexture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(frostProgram);
+    gl.uniform1i(gl.getUniformLocation(frostProgram, 'uScene'), 0);
+  } catch (error) {
+    gl.deleteProgram(sceneProgram);
+    if (frostProgram) gl.deleteProgram(frostProgram);
+    if (vao) gl.deleteVertexArray(vao);
+    if (sceneTexture) gl.deleteTexture(sceneTexture);
+    if (sceneFramebuffer) gl.deleteFramebuffer(sceneFramebuffer);
+    throw error;
+  }
+
   return {
-    resolution: gl.getUniformLocation(program, 'uResolution'),
-    bounds: gl.getUniformLocation(program, 'uBounds'),
-    pixelRatio: gl.getUniformLocation(program, 'uPixelRatio'),
-    followerState: gl.getUniformLocation(program, 'uFollowerState'),
-    spheres: gl.getUniformLocation(program, 'uSpheres[0]'),
+    sceneProgram,
+    frostProgram,
+    sceneTexture,
+    sceneFramebuffer,
+    resolution: gl.getUniformLocation(sceneProgram, 'uResolution'),
+    bounds: gl.getUniformLocation(sceneProgram, 'uBounds'),
+    pixelRatio: gl.getUniformLocation(sceneProgram, 'uPixelRatio'),
+    followerState: gl.getUniformLocation(sceneProgram, 'uFollowerState'),
+    spheres: gl.getUniformLocation(sceneProgram, 'uSpheres[0]'),
+    frostResolution: gl.getUniformLocation(frostProgram, 'uResolution'),
+    scatterRadius: gl.getUniformLocation(frostProgram, 'uScatterRadius'),
   };
 }
 

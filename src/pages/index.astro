@@ -24,8 +24,8 @@ const drawingDescription = '灰色の空間を漂う大小の黒い球体と、�
   }
 
   .drawing-viewport {
-    --sphere-blur: 6px;
-    --blur-padding: calc(4 * var(--sphere-blur));
+    --frost-radius: 6px;
+    --frost-padding: calc(4 * var(--frost-radius));
     position: fixed;
     inset: 0;
     overflow: hidden;
@@ -34,11 +34,10 @@ const drawingDescription = '灰色の空間を漂う大小の黒い球体と、�
 
   #drawing {
     position: absolute;
-    inset: calc(-1 * var(--blur-padding));
+    inset: calc(-1 * var(--frost-padding));
     display: block;
-    width: calc(100% + 2 * var(--blur-padding));
-    height: calc(100% + 2 * var(--blur-padding));
-    filter: blur(var(--sphere-blur));
+    width: calc(100% + 2 * var(--frost-padding));
+    height: calc(100% + 2 * var(--frost-padding));
     pointer-events: auto;
     touch-action: pinch-zoom;
   }
